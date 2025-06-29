@@ -7,6 +7,7 @@ enum Token {
     Comma,
     Create,
     Database,
+    Delete,
     Drop,
     Equal,
     Float,
@@ -142,6 +143,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     "set" => tokens.push(Token::Set),
                     "and" => tokens.push(Token::And),
                     "or" => tokens.push(Token::Or),
+                    "delete" => tokens.push(Token::Delete),
                     _ => tokens.push(Token::Identifier(ident)),
                 }
             }
@@ -161,6 +163,18 @@ enum Statement {
     Drop(DropStatement),
     Insert(InsertStatement),
     Update(UpdateStatement),
+    Delete(DeleteStatement),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DeleteStatement {
+    core: DeleteCore,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DeleteCore {
+    table: String,
+    conditions: Option<Vec<Condition>>, // TODO! does this handle multiple
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -586,7 +600,7 @@ impl Parser {
         }
     }
 
-    fn parse_update_condition(&mut self) -> Result<Condition, String> {
+    fn parse_condition(&mut self) -> Result<Condition, String> {
         let column = self.expect_identifier()?.to_string();
         let criterion = self.expect_criterion()?;
         let value = self.expect_value()?;
@@ -598,15 +612,16 @@ impl Parser {
         })
     }
 
-    fn parse_update_conditions(&mut self) -> Result<Option<Vec<Condition>>, String> {
-        if !matches!(self.next_token(), Some(Token::Where)) {
+    fn parse_conditions(&mut self) -> Result<Option<Vec<Condition>>, String> {
+        if !matches!(self.peek_next_token(), Some(Token::Where)) {
             return Ok(None);
         }
+        self.advance(); // skip where
 
         let mut conds = Vec::new();
         // TODO! What's the guard for condition?
         loop {
-            conds.push(self.parse_update_condition()?);
+            conds.push(self.parse_condition()?);
             if let Some(next) = self.peek_next_token()
                 && matches!(next, Token::And | Token::Or)
             {
@@ -643,7 +658,7 @@ impl Parser {
         let table = self.expect_identifier()?.to_string();
         self.expect_eq(Token::Set)?;
         let columns = self.parse_update_columns()?;
-        let conditions = self.parse_update_conditions()?;
+        let conditions = self.parse_conditions()?;
         Ok(UpdateCore {
             table,
             columns,
@@ -657,6 +672,21 @@ impl Parser {
         Ok(UpdateStatement { core })
     }
 
+    fn parse_delete_core(&mut self) -> Result<DeleteCore, String> {
+        let table = self.expect_identifier()?.to_string();
+        let conditions = self.parse_conditions()?;
+
+        Ok(DeleteCore { table, conditions })
+    }
+
+    fn parse_delete(&mut self) -> Result<DeleteStatement, String> {
+        self.expect_eq(Token::Delete)?;
+        self.expect_eq(Token::From)?;
+        let core = self.parse_delete_core()?;
+
+        Ok(DeleteStatement { core })
+    }
+
     pub fn parse_statement(&mut self) -> Result<Statement, String> {
         match self.tokens.first() {
             Some(token) => match token {
@@ -665,6 +695,7 @@ impl Parser {
                 Token::Create => Ok(Statement::Create(self.parse_create()?)),
                 Token::Insert => Ok(Statement::Insert(self.parse_insert()?)),
                 Token::Update => Ok(Statement::Update(self.parse_update()?)),
+                Token::Delete => Ok(Statement::Delete(self.parse_delete()?)),
                 other => Err(format!("Unexpected command token: {other:?}")),
             },
             None => Err("Unexpected end on input".to_string()),
@@ -698,8 +729,16 @@ fn parse_statement(input: &str) -> Result<Statement, String> {
 // insert into cats(name, age) values (tracy, 10), (mike, 12);
 // insert into cats(name, age) values('mike andrew', 12);
 
+// update cats set age = 20;
 // update cats set age = 15 where name = 'mike';
 // update cats set name = 'andrew', age = 20 where name = 'mike';
+// update cats set name = andrew where name = mike or name = annette;
+// update cats set name = andrew where name = mike and name = annette;
+
+// delete from cats;
+// delete from cats where name = 'andrew';
+// TODO! Does delete allow multi conditions
+// My version supports multi conditions
 fn main() -> Result<(), String> {
     // let stmt = "select names as n from cats;";
     // let stmt = "drop table cats;";
@@ -806,6 +845,12 @@ mod tests {
         use crate::parse_statement;
 
         #[test]
+        fn test_no_condition() {
+            let s = "update cats set age = 25;";
+            assert!(parse_statement(s).is_ok());
+        }
+
+        #[test]
         fn test_single_column() {
             let s = "update cats set age = 15 where name = 'mike';";
             assert!(parse_statement(s).is_ok());
@@ -830,6 +875,29 @@ mod tests {
             let s = "update cats set name = 'andrew', age = 20 where name = 'mike' and email = 'foo@me.com';";
             assert!(parse_statement(s).is_ok());
             let s = "update cats set name = 'andrew', age = 20 where name = 'mike' or email = 'foo@me.com';";
+            assert!(parse_statement(s).is_ok());
+        }
+    }
+
+    mod parse_delete {
+        use crate::parse_statement;
+
+        #[test]
+        fn test_no_condition() {
+            let s = "delete from cats;";
+            assert!(parse_statement(s).is_ok());
+        }
+
+        #[test]
+        fn test_single_condition() {
+            let s = "delete from cats where name = 20;";
+            assert!(parse_statement(s).is_ok());
+        }
+
+        #[test]
+        #[ignore]
+        fn test_multi_conditions() {
+            let s = "delete from cats where name = 'mike' and age = 20;";
             assert!(parse_statement(s).is_ok());
         }
     }
