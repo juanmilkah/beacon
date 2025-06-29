@@ -1,24 +1,36 @@
 #[derive(Debug, Eq, PartialEq)]
 enum Token {
+    And,
     As,
+    Bang,
+    BangEqual,
     Comma,
     Create,
     Database,
     Drop,
+    Equal,
     Float,
     From,
+    Greater,
+    GreaterEqual,
     Identifier(String),
     Insert,
     Int,
     Into,
     LeftParen,
+    Less,
+    LessEqual,
+    Or,
     RightParen,
     Select,
     SemiColon,
+    Set,
     Star,
     Table,
     Text,
+    Update,
     Values,
+    Where,
 }
 
 impl Token {
@@ -42,6 +54,16 @@ impl Token {
             other => Err(format!("Unknown data type: {other:?}")),
         }
     }
+
+    fn to_value(&self) -> Result<Value, String> {
+        match self {
+            Token::Identifier(ident) => match ident.parse::<i32>() {
+                Ok(num) => Ok(Value::Int(num)),
+                Err(_) => Ok(Value::Text(ident.to_string())),
+            },
+            _ => Err("Invalid token type for to_value conversion".to_string()),
+        }
+    }
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>, String> {
@@ -55,6 +77,37 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             ',' => tokens.push(Token::Comma),
             '(' => tokens.push(Token::LeftParen),
             ')' => tokens.push(Token::RightParen),
+            '=' => tokens.push(Token::Equal),
+            '!' => {
+                if let Some(next) = input.peek()
+                    && matches!(next, '=')
+                {
+                    tokens.push(Token::BangEqual);
+                    input.next();
+                } else {
+                    tokens.push(Token::Bang)
+                }
+            }
+            '<' => {
+                if let Some(next) = input.peek()
+                    && matches!(next, '=')
+                {
+                    tokens.push(Token::LessEqual);
+                    input.next();
+                } else {
+                    tokens.push(Token::Less)
+                }
+            }
+            '>' => {
+                if let Some(next) = input.peek()
+                    && matches!(next, '=')
+                {
+                    tokens.push(Token::GreaterEqual);
+                    input.next();
+                } else {
+                    tokens.push(Token::Greater)
+                }
+            }
             '\'' => {
                 let mut ident = String::new();
                 while let Some(c) = input.next_if(|cc| *cc != '\'') {
@@ -84,6 +137,11 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     "into" => tokens.push(Token::Into),
                     "insert" => tokens.push(Token::Insert),
                     "values" => tokens.push(Token::Values),
+                    "update" => tokens.push(Token::Update),
+                    "where" => tokens.push(Token::Where),
+                    "set" => tokens.push(Token::Set),
+                    "and" => tokens.push(Token::And),
+                    "or" => tokens.push(Token::Or),
                     _ => tokens.push(Token::Identifier(ident)),
                 }
             }
@@ -102,6 +160,43 @@ enum Statement {
     Create(CreateStatement),
     Drop(DropStatement),
     Insert(InsertStatement),
+    Update(UpdateStatement),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct UpdateStatement {
+    core: UpdateCore,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct UpdateCore {
+    table: String,
+    columns: Vec<Expr>,
+    conditions: Option<Vec<Condition>>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct Condition {
+    column: String,
+    criterion: Criterion,
+    value: Value,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Value {
+    Text(String),
+    Int(i32),
+    // Float(f32), //TODO! handle floats
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Criterion {
+    GreaterThan,
+    EqualTo,
+    LessThan,
+    GreaterEqualTo,
+    LessEqualTo,
+    NotEqualTo,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -201,6 +296,13 @@ struct ExprResultColumn {
 enum Expr {
     Column(Column),
     FatColumn(FatColumn),
+    PregnantColumn(PregnantColumn),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PregnantColumn {
+    name: String,
+    value: Value,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -270,6 +372,11 @@ impl Parser {
     fn expect_identifier(&mut self) -> Result<&str, String> {
         self.expect_matching(|t| matches!(t, Token::Identifier(_)))
             .map(|t| t.as_identifier().unwrap())
+    }
+
+    fn expect_value(&mut self) -> Result<Value, String> {
+        self.expect_matching(|t| matches!(t, Token::Identifier(_)))
+            .map(|t| t.to_value())?
     }
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
@@ -464,6 +571,92 @@ impl Parser {
         Ok(InsertStatement { core })
     }
 
+    fn expect_criterion(&mut self) -> Result<Criterion, String> {
+        match self.next_token() {
+            None => Err("Missing criterion for condition;".to_string()),
+            Some(c) => match c {
+                Token::Less => Ok(Criterion::LessThan),
+                Token::Greater => Ok(Criterion::GreaterThan),
+                Token::LessEqual => Ok(Criterion::LessEqualTo),
+                Token::GreaterEqual => Ok(Criterion::GreaterEqualTo),
+                Token::BangEqual => Ok(Criterion::NotEqualTo),
+                Token::Equal => Ok(Criterion::EqualTo),
+                other => Err(format!("Expected criterion, found: {other:?}")),
+            },
+        }
+    }
+
+    fn parse_update_condition(&mut self) -> Result<Condition, String> {
+        let column = self.expect_identifier()?.to_string();
+        let criterion = self.expect_criterion()?;
+        let value = self.expect_value()?;
+
+        Ok(Condition {
+            column,
+            criterion,
+            value,
+        })
+    }
+
+    fn parse_update_conditions(&mut self) -> Result<Option<Vec<Condition>>, String> {
+        if !matches!(self.next_token(), Some(Token::Where)) {
+            return Ok(None);
+        }
+
+        let mut conds = Vec::new();
+        // TODO! What's the guard for condition?
+        loop {
+            conds.push(self.parse_update_condition()?);
+            if let Some(next) = self.peek_next_token()
+                && matches!(next, Token::And | Token::Or)
+            {
+                self.advance();
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        Ok(Some(conds))
+    }
+
+    fn parse_update_column(&mut self) -> Result<Expr, String> {
+        let name = self.expect_identifier()?.to_string();
+        self.expect_eq(Token::Equal)?;
+        let value = self.expect_value()?;
+
+        Ok(Expr::PregnantColumn(PregnantColumn { name, value }))
+    }
+
+    fn parse_update_columns(&mut self) -> Result<Vec<Expr>, String> {
+        let mut cols = vec![self.parse_update_column()?];
+
+        while matches!(self.peek_next_token(), Some(Token::Comma)) {
+            self.advance();
+            cols.push(self.parse_update_column()?);
+        }
+
+        Ok(cols)
+    }
+
+    fn parse_update_core(&mut self) -> Result<UpdateCore, String> {
+        let table = self.expect_identifier()?.to_string();
+        self.expect_eq(Token::Set)?;
+        let columns = self.parse_update_columns()?;
+        let conditions = self.parse_update_conditions()?;
+        Ok(UpdateCore {
+            table,
+            columns,
+            conditions,
+        })
+    }
+
+    fn parse_update(&mut self) -> Result<UpdateStatement, String> {
+        self.expect_eq(Token::Update)?;
+        let core = self.parse_update_core()?;
+        Ok(UpdateStatement { core })
+    }
+
     pub fn parse_statement(&mut self) -> Result<Statement, String> {
         match self.tokens.first() {
             Some(token) => match token {
@@ -471,6 +664,7 @@ impl Parser {
                 Token::Select => Ok(Statement::Select(self.parse_select()?)),
                 Token::Create => Ok(Statement::Create(self.parse_create()?)),
                 Token::Insert => Ok(Statement::Insert(self.parse_insert()?)),
+                Token::Update => Ok(Statement::Update(self.parse_update()?)),
                 other => Err(format!("Unexpected command token: {other:?}")),
             },
             None => Err("Unexpected end on input".to_string()),
@@ -503,12 +697,17 @@ fn parse_statement(input: &str) -> Result<Statement, String> {
 // insert into cats(name, age) values(tracy, 10);
 // insert into cats(name, age) values (tracy, 10), (mike, 12);
 // insert into cats(name, age) values('mike andrew', 12);
+
+// update cats set age = 15 where name = 'mike';
+// update cats set name = 'andrew', age = 20 where name = 'mike';
 fn main() -> Result<(), String> {
     // let stmt = "select names as n from cats;";
     // let stmt = "drop table cats;";
     // let s = "create table cats (name text, age int) ;";
     // let s = "insert into cats(name, age) values(mike, 10);";
-    let s = "insert into cats(name, age) values('mike andrew', 12);";
+    // let s = "insert into cats(name, age) values('mike andrew', 12);";
+    // let s = "update cats set count = 0 where age = 10;";
+    let s = "update cats set name = 'andrew', age = 20 where name = 'mike';";
     let stmt = parse_statement(s)?;
     println!("{stmt:#?}");
 
@@ -599,6 +798,38 @@ mod tests {
         #[test]
         fn test_quoted_idents() {
             let s = "insert into cats(name, age) values('mike andrew', 12);";
+            assert!(parse_statement(s).is_ok());
+        }
+    }
+
+    mod parse_update {
+        use crate::parse_statement;
+
+        #[test]
+        fn test_single_column() {
+            let s = "update cats set age = 15 where name = 'mike';";
+            assert!(parse_statement(s).is_ok());
+            let s = "update cats set age = 15 where name > 'mike';";
+            assert!(parse_statement(s).is_ok());
+            let s = "update cats set age = 15 where name < 'mike';";
+            assert!(parse_statement(s).is_ok());
+            let s = "update cats set age = 15 where name >= 'mike';";
+            assert!(parse_statement(s).is_ok());
+            let s = "update cats set age = 15 where name <= 'mike';";
+            assert!(parse_statement(s).is_ok());
+        }
+
+        #[test]
+        fn test_multi_columns() {
+            let s = "update cats set name = 'andrew', age = 20 where name = 'mike';";
+            assert!(parse_statement(s).is_ok());
+        }
+
+        #[test]
+        fn test_multi_condition() {
+            let s = "update cats set name = 'andrew', age = 20 where name = 'mike' and email = 'foo@me.com';";
+            assert!(parse_statement(s).is_ok());
+            let s = "update cats set name = 'andrew', age = 20 where name = 'mike' or email = 'foo@me.com';";
             assert!(parse_statement(s).is_ok());
         }
     }
