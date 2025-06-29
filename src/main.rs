@@ -5,9 +5,12 @@ enum Token {
     Create,
     Database,
     Drop,
+    Float,
     From,
     Identifier(String),
+    Insert,
     Int,
+    Into,
     LeftParen,
     RightParen,
     Select,
@@ -15,6 +18,7 @@ enum Token {
     Star,
     Table,
     Text,
+    Values,
 }
 
 impl Token {
@@ -27,13 +31,14 @@ impl Token {
     }
 
     fn is_data_type(&self) -> bool {
-        matches!(self, Token::Int | Token::Text)
+        matches!(self, Token::Int | Token::Text | Token::Float)
     }
 
     fn to_data_type(&self) -> Result<DataType, String> {
         match self {
             Token::Int => Ok(DataType::Int),
             Token::Text => Ok(DataType::Text),
+            Token::Float => Ok(DataType::Float),
             other => Err(format!("Unknown data type: {other:?}")),
         }
     }
@@ -50,8 +55,16 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             ',' => tokens.push(Token::Comma),
             '(' => tokens.push(Token::LeftParen),
             ')' => tokens.push(Token::RightParen),
+            '\'' => {
+                let mut ident = String::new();
+                while let Some(c) = input.next_if(|cc| *cc != '\'') {
+                    ident.extend(c.to_lowercase());
+                }
+                input.next();
+                tokens.push(Token::Identifier(ident))
+            }
             c if c.is_whitespace() => continue,
-            c if c.is_alphabetic() => {
+            c if c.is_alphanumeric() => {
                 let mut ident = c.to_string().to_lowercase();
                 while let Some(cc) = input.next_if(|cc| cc.is_alphanumeric() || *cc == '_') {
                     ident.extend(cc.to_lowercase());
@@ -67,6 +80,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     "create" => tokens.push(Token::Create),
                     "int" | "integer" => tokens.push(Token::Int),
                     "text" => tokens.push(Token::Text),
+                    "float" => tokens.push(Token::Float),
+                    "into" => tokens.push(Token::Into),
+                    "insert" => tokens.push(Token::Insert),
+                    "values" => tokens.push(Token::Values),
                     _ => tokens.push(Token::Identifier(ident)),
                 }
             }
@@ -84,6 +101,19 @@ enum Statement {
     Select(SelectStatement),
     Create(CreateStatement),
     Drop(DropStatement),
+    Insert(InsertStatement),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct InsertStatement {
+    core: InsertCore,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct InsertCore {
+    table: String,
+    columns: Vec<Expr>,
+    values: Vec<Vec<Expr>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -187,6 +217,7 @@ struct FatColumn {
 #[derive(Debug, Eq, PartialEq)]
 enum DataType {
     Int,
+    Float,
     Text,
 }
 
@@ -232,6 +263,7 @@ impl Parser {
 
     fn expect_eq(&mut self, expected: Token) -> Result<&Token, String> {
         self.expect_matching(|t| *t == expected)
+            .map_err(|err| format!("{err}, Expected: {expected:?}"))
     }
 
     /// Get string representation of ident; fail if token is not ident
@@ -386,12 +418,59 @@ impl Parser {
         })
     }
 
+    fn parse_insert_values(&mut self) -> Result<Vec<Vec<Expr>>, String> {
+        self.expect_eq(Token::LeftParen)?;
+        let mut vals = vec![self.parse_insert_columns()?];
+        self.expect_eq(Token::RightParen)?;
+
+        while self.next_token_is(Token::Comma) {
+            self.advance();
+            self.expect_eq(Token::LeftParen)?;
+            vals.push(self.parse_insert_columns()?);
+            self.expect_eq(Token::RightParen)?;
+        }
+        Ok(vals)
+    }
+
+    fn parse_insert_columns(&mut self) -> Result<Vec<Expr>, String> {
+        let mut cols = vec![self.parse_expr()?];
+
+        while self.next_token_is(Token::Comma) {
+            self.advance();
+            cols.push(self.parse_expr()?);
+        }
+
+        Ok(cols)
+    }
+
+    fn parse_insert_core(&mut self) -> Result<InsertCore, String> {
+        let table = self.expect_identifier()?.to_string();
+        self.expect_eq(Token::LeftParen)?;
+        let columns = self.parse_insert_columns()?;
+        self.expect_eq(Token::RightParen)?;
+        self.expect_eq(Token::Values)?;
+        let values = self.parse_insert_values()?;
+        Ok(InsertCore {
+            table,
+            columns,
+            values,
+        })
+    }
+
+    fn parse_insert(&mut self) -> Result<InsertStatement, String> {
+        self.expect_eq(Token::Insert)?;
+        self.expect_eq(Token::Into)?;
+        let core = self.parse_insert_core()?;
+        Ok(InsertStatement { core })
+    }
+
     pub fn parse_statement(&mut self) -> Result<Statement, String> {
         match self.tokens.first() {
             Some(token) => match token {
                 Token::Drop => Ok(Statement::Drop(self.parse_drop()?)),
                 Token::Select => Ok(Statement::Select(self.parse_select()?)),
                 Token::Create => Ok(Statement::Create(self.parse_create()?)),
+                Token::Insert => Ok(Statement::Insert(self.parse_insert()?)),
                 other => Err(format!("Unexpected command token: {other:?}")),
             },
             None => Err("Unexpected end on input".to_string()),
@@ -401,6 +480,7 @@ impl Parser {
 
 fn parse_statement(input: &str) -> Result<Statement, String> {
     let tokens = tokenize(input)?;
+    // dbg!(&tokens);
     let mut parser = Parser::new(tokens);
     let stmt = parser.parse_statement()?;
     parser.expect_eq(Token::SemiColon)?;
@@ -418,10 +498,17 @@ fn parse_statement(input: &str) -> Result<Statement, String> {
 // create database foo;
 // create table foo(name text);
 // create table foo(name text, age int);
+
+// insert into cats(name) values(tracy);
+// insert into cats(name, age) values(tracy, 10);
+// insert into cats(name, age) values (tracy, 10), (mike, 12);
+// insert into cats(name, age) values('mike andrew', 12);
 fn main() -> Result<(), String> {
     // let stmt = "select names as n from cats;";
     // let stmt = "drop table cats;";
-    let s = "create table cats (name text, age int) ;";
+    // let s = "create table cats (name text, age int) ;";
+    // let s = "insert into cats(name, age) values(mike, 10);";
+    let s = "insert into cats(name, age) values('mike andrew', 12);";
     let stmt = parse_statement(s)?;
     println!("{stmt:#?}");
 
@@ -484,6 +571,34 @@ mod tests {
         #[test]
         fn test_multi_row() {
             let s = "create table cats (name text, age int);";
+            assert!(parse_statement(s).is_ok());
+        }
+    }
+
+    mod parse_insert {
+        use crate::parse_statement;
+
+        #[test]
+        fn test_singles() {
+            let s = "insert into cats(name) values(mike);";
+            assert!(parse_statement(s).is_ok());
+        }
+
+        #[test]
+        fn test_multi_cols() {
+            let s = "insert into cats(name, age) values(mike, 10);";
+            assert!(parse_statement(s).is_ok());
+        }
+
+        #[test]
+        fn test_multi_values() {
+            let s = "insert into cats(name, age) values (mike, 10), (stacy, 12);";
+            assert!(parse_statement(s).is_ok());
+        }
+
+        #[test]
+        fn test_quoted_idents() {
+            let s = "insert into cats(name, age) values('mike andrew', 12);";
             assert!(parse_statement(s).is_ok());
         }
     }
