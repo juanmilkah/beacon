@@ -1,3 +1,6 @@
+use std::fmt;
+
+// Ast generator
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     And,
@@ -42,6 +45,55 @@ enum Token {
     Update,
     Values,
     Where,
+}
+
+impl fmt::Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Token::And => write!(f, "and"),
+            Token::As => write!(f, "as"),
+            Token::Asc => write!(f, "asc"),
+            Token::Bang => write!(f, "!"),
+            Token::BangEqual => write!(f, "!="),
+            Token::Bool => write!(f, "bool"),
+            Token::Comma => write!(f, ","),
+            Token::Create => write!(f, "create"),
+            Token::Database => write!(f, "database"),
+            Token::Delete => write!(f, "delete"),
+            Token::Desc => write!(f, "desc"),
+            Token::Drop => write!(f, "drop"),
+            Token::Equal => write!(f, "="),
+            Token::Float => write!(f, "float"),
+            Token::From => write!(f, "from"),
+            Token::Greater => write!(f, ">"),
+            Token::GreaterEqual => write!(f, ">="),
+            Token::GroupBy => write!(f, "group by"),
+            Token::StringLiteral(s) => write!(f, "{s}"),
+            Token::BoolLiteral(b) => write!(f, "{b}"),
+            Token::IntLiteral(i) => write!(f, "{i}"),
+            Token::FloatLiteral(fl) => write!(f, "{fl}"),
+            Token::Insert => write!(f, "insert"),
+            Token::Int => write!(f, "int"),
+            Token::Into => write!(f, "into"),
+            Token::LeftParen => write!(f, "("),
+            Token::Less => write!(f, "<"),
+            Token::LessEqual => write!(f, "<="),
+            Token::Limit => write!(f, "limit"),
+            Token::Offset => write!(f, "offset"),
+            Token::Or => write!(f, "or"),
+            Token::OrderBy => write!(f, "order by"),
+            Token::RightParen => write!(f, ")"),
+            Token::Select => write!(f, "select"),
+            Token::SemiColon => write!(f, ";"),
+            Token::Set => write!(f, "set"),
+            Token::Star => write!(f, "*"),
+            Token::Table => write!(f, "table"),
+            Token::Text => write!(f, "text"),
+            Token::Update => write!(f, "update"),
+            Token::Values => write!(f, "values"),
+            Token::Where => write!(f, "where"),
+        }
+    }
 }
 
 impl Token {
@@ -404,6 +456,17 @@ enum DataType {
     Float,
     Text,
     Bool,
+}
+
+impl fmt::Display for DataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataType::Int => write!(f, "Int"),
+            DataType::Float => write!(f, "Float"),
+            DataType::Text => write!(f, "Text"),
+            DataType::Bool => write!(f, "Bool"),
+        }
+    }
 }
 
 /// Recursive Descent parser
@@ -828,15 +891,6 @@ impl Parser {
     }
 }
 
-fn parse_statement(input: &str) -> Result<Statement, String> {
-    let tokens = tokenize(input)?;
-    dbg!(&tokens);
-    let mut parser = Parser::new(tokens);
-    let stmt = parser.parse_statement()?;
-    parser.expect_eq(Token::SemiColon)?;
-    Ok(stmt)
-}
-
 // select * from foo;
 // select name from foo;
 // select name as n from foo;
@@ -880,21 +934,257 @@ fn parse_statement(input: &str) -> Result<Statement, String> {
 // delete from cats;
 // delete from cats where name = 'andrew';
 // delete from cats where name = 'andrew' and age = 20;
+
+fn parse_statement(input: &str) -> Result<Statement, String> {
+    let tokens = tokenize(input)?;
+    // dbg!(&tokens);
+    let mut parser = Parser::new(tokens);
+    let stmt = parser.parse_statement()?;
+    parser.expect_eq(Token::SemiColon)?;
+    Ok(stmt)
+}
+
+// The compiler
+#[derive(Debug, Clone, PartialEq)]
+enum OpCode {
+    CreateTable,
+    CreateDatabase,
+    DropDatabase,
+    DropTable,
+    Insert,
+    Update,
+    Delete,
+    Select,
+    // stack ops
+    LoadTable,
+    LoadColumn,
+    LoadValue,
+    LoadCriterion,
+    //
+    Filter,
+    SetColumn,
+    Halt,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Instruction {
+    opcode: OpCode,
+    operand: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Compiler {
+    instructions: Vec<Instruction>,
+}
+
+impl Compiler {
+    fn new() -> Self {
+        Self {
+            instructions: Vec::new(),
+        }
+    }
+
+    fn emit(&mut self, opcode: OpCode, operand: Option<String>) {
+        self.instructions.push(Instruction { opcode, operand })
+    }
+
+    fn compile_select_statement(&mut self, stmt: &SelectStatement) {
+        let core = &stmt.core;
+
+        match &core.from {
+            SelectFrom::Table(table) => self.emit(OpCode::LoadValue, Some(table.clone())),
+        }
+
+        for col in &core.result_columns {
+            match col {
+                ResultColumn::Star => self.emit(OpCode::LoadColumn, Some("*".to_string())),
+                ResultColumn::Expr(aliased_column) => {
+                    self.compile_column_expr(&aliased_column.expr)
+                }
+            }
+        }
+
+        if let Some(conditions) = &core.conditions {
+            for condition in conditions {
+                match condition {
+                    Condition::Single(single_condition) => {
+                        self.emit(OpCode::LoadValue, Some(single_condition.name.to_string()));
+                    }
+                    Condition::Double(double_condition) => {
+                        self.emit(OpCode::LoadValue, Some(double_condition.name.to_string()));
+                        self.compile_value(&double_condition.value);
+                    }
+                    Condition::Multi(multi_condition) => {
+                        self.compile_multi_condition(multi_condition);
+                    }
+                }
+            }
+        }
+
+        self.emit(OpCode::Select, None);
+    }
+
+    fn compile_create_statement(&mut self, stmt: &CreateStatement) {
+        match &stmt.core.family {
+            CreateFamily::Database(create_database) => {
+                self.emit(OpCode::LoadValue, Some(create_database.name.clone()));
+                self.emit(OpCode::CreateDatabase, None);
+            }
+            CreateFamily::Table(create_table) => {
+                self.emit(OpCode::LoadValue, Some(create_table.name.clone()));
+                for col in &create_table.columns {
+                    self.compile_column_expr(col);
+                }
+
+                self.emit(OpCode::CreateTable, None);
+            }
+        }
+    }
+
+    fn compile_update_statement(&mut self, stmt: &UpdateStatement) {
+        let core = &stmt.core;
+
+        for col in &core.columns {
+            if let ColumnExpr::Assignment(assignment) = col {
+                self.emit(OpCode::LoadColumn, Some(assignment.name.clone()));
+                self.compile_value(&assignment.value);
+                self.emit(OpCode::SetColumn, None);
+            }
+        }
+
+        if let Some(conditions) = &core.conditions {
+            self.compile_conditions(conditions);
+        }
+
+        self.emit(OpCode::Update, None);
+    }
+
+    fn compile_drop_statement(&mut self, stmt: &DropStatement) {
+        match &stmt.core.family {
+            DropFamily::Database(drop_database) => {
+                self.emit(OpCode::LoadValue, Some(drop_database.name.clone()));
+                self.emit(OpCode::DropDatabase, None);
+            }
+            DropFamily::Table(drop_table) => {
+                self.emit(OpCode::LoadValue, Some(drop_table.name.clone()));
+                self.emit(OpCode::DropTable, None);
+            }
+        }
+    }
+
+    fn compile_column_expr(&mut self, col: &ColumnExpr) {
+        match col {
+            ColumnExpr::Name(column_name) => {
+                self.emit(OpCode::LoadColumn, Some(column_name.name.clone()))
+            }
+            ColumnExpr::Typed(typed_column) => {
+                self.emit(OpCode::LoadColumn, Some(typed_column.col_name.clone()));
+                self.emit(OpCode::LoadValue, Some(typed_column.data_type.to_string()));
+            }
+            ColumnExpr::Assignment(value_assignment) => {
+                self.emit(OpCode::LoadColumn, Some(value_assignment.name.clone()));
+                self.compile_value(&value_assignment.value);
+            }
+        }
+    }
+
+    fn compile_insert_statement(&mut self, stmt: &InsertStatement) {
+        let core = &stmt.core;
+
+        self.emit(OpCode::LoadTable, Some(core.table.clone()));
+
+        for col in &core.columns {
+            self.compile_column_expr(col);
+        }
+
+        for row in &core.values {
+            for val in row {
+                self.compile_value(val);
+            }
+        }
+
+        self.emit(OpCode::Insert, None);
+    }
+
+    fn compile_value(&mut self, value: &Value) {
+        let v = match value {
+            Value::Text(t) => format!("Text:{t}"),
+            Value::Int(i) => format!("Int:{i}"),
+            Value::Bool(b) => format!("Bool:{b}"),
+            Value::Float(f) => format!("Float:{f}"),
+        };
+
+        self.emit(OpCode::LoadValue, Some(v))
+    }
+
+    fn compile_criterion(&mut self, criterion: &Criterion) {
+        let cr = match criterion {
+            Criterion::GreaterThan => ">",
+            Criterion::EqualTo => "=",
+            Criterion::LessThan => "<",
+            Criterion::GreaterEqualTo => ">=",
+            Criterion::LessEqualTo => "<=",
+            Criterion::NotEqualTo => "!=",
+        };
+
+        self.emit(OpCode::LoadCriterion, Some(cr.to_string()));
+    }
+
+    fn compile_multi_condition(&mut self, condition: &MultiCondition) {
+        self.emit(OpCode::LoadColumn, Some(condition.column.clone()));
+        self.compile_criterion(&condition.criterion);
+        self.compile_value(&condition.value);
+        self.emit(OpCode::Filter, None);
+    }
+
+    fn compile_conditions(&mut self, conditions: &[MultiCondition]) {
+        for condition in conditions {
+            self.compile_multi_condition(condition);
+        }
+    }
+
+    fn compile_delete_statement(&mut self, stmt: &DeleteStatement) {
+        let core = &stmt.core;
+        self.emit(OpCode::LoadTable, Some(core.table.clone()));
+
+        if let Some(conditions) = &core.conditions {
+            self.compile_conditions(conditions);
+        }
+
+        self.emit(OpCode::Delete, None);
+    }
+
+    fn compile_statement(&mut self, stmt: &Statement) {
+        match stmt {
+            Statement::Select(select_statement) => self.compile_select_statement(select_statement),
+            Statement::Create(create_statement) => self.compile_create_statement(create_statement),
+            Statement::Drop(drop_statement) => self.compile_drop_statement(drop_statement),
+            Statement::Insert(insert_statement) => self.compile_insert_statement(insert_statement),
+            Statement::Update(update_statement) => self.compile_update_statement(update_statement),
+            Statement::Delete(delete_statement) => self.compile_delete_statement(delete_statement),
+        }
+    }
+
+    fn finish(mut self) -> Vec<Instruction> {
+        self.instructions.push(Instruction {
+            opcode: OpCode::Halt,
+            operand: None,
+        });
+        self.instructions
+    }
+}
+
+fn compile(stmt: &Statement) -> Vec<Instruction> {
+    let mut compiler = Compiler::new();
+    compiler.compile_statement(stmt);
+    compiler.finish()
+}
+
 fn main() -> Result<(), String> {
-    // let s = "select names as n from cats;";
-    // let s = "drop table cats;";
-    // let s = "create table cats (name text, age int) ;";
-    // let s = "insert into cats(name, age) values(mike, 10);";
-    // let s = "insert into cats(name, age) values('mike andrew', 12);";
-    // let s = "update cats set count = 0 where age = 10;";
-    // let s = "update cats set name = 'andrew', age = 20 where name = 'mike';";
-    // let s = "insert into cats(is_male) values(true);";
-    // let s = "select * from foo offset 10;";
-    // let s = "SELECT * FROM users LIMIT 10 OFFSET 5;";
-    // let s = "SELECT * FROM users ORDER BY created_at DESC;";
     let s = "SELECT department FROM employees GROUP BY department;";
     let stmt = parse_statement(s)?;
-    println!("{stmt:#?}");
+    let bytecode = compile(&stmt);
+    println!("{bytecode:#?}");
 
     Ok(())
 }
