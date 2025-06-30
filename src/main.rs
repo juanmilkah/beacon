@@ -1,9 +1,12 @@
-#[derive(Debug, Eq, PartialEq)]
+// TODO! Correctly parse Insert statement values and their datatypes
+
+#[derive(Debug, PartialEq)]
 enum Token {
     And,
     As,
     Bang,
     BangEqual,
+    Bool,
     Comma,
     Create,
     Database,
@@ -14,7 +17,10 @@ enum Token {
     From,
     Greater,
     GreaterEqual,
-    Identifier(String),
+    StringLiteral(String),
+    BoolLiteral(bool),
+    IntLiteral(i32),
+    FloatLiteral(f32),
     Insert,
     Int,
     Into,
@@ -38,7 +44,7 @@ impl Token {
     /// Return string representation of token if is an identifier
     fn as_identifier(&self) -> Option<&str> {
         match self {
-            Token::Identifier(s) => Some(s),
+            Token::StringLiteral(s) => Some(s),
             _ => None,
         }
     }
@@ -52,16 +58,17 @@ impl Token {
             Token::Int => Ok(DataType::Int),
             Token::Text => Ok(DataType::Text),
             Token::Float => Ok(DataType::Float),
+            Token::Bool => Ok(DataType::Bool),
             other => Err(format!("Unknown data type: {other:?}")),
         }
     }
 
     fn to_value(&self) -> Result<Value, String> {
         match self {
-            Token::Identifier(ident) => match ident.parse::<i32>() {
-                Ok(num) => Ok(Value::Int(num)),
-                Err(_) => Ok(Value::Text(ident.to_string())),
-            },
+            Token::StringLiteral(t) => Ok(Value::Text(t.to_string())),
+            Token::FloatLiteral(f) => Ok(Value::Float(*f)),
+            Token::IntLiteral(i) => Ok(Value::Int(*i)),
+            Token::BoolLiteral(b) => Ok(Value::Bool(*b)),
             _ => Err("Invalid token type for to_value conversion".to_string()),
         }
     }
@@ -115,7 +122,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     ident.extend(c.to_lowercase());
                 }
                 input.next();
-                tokens.push(Token::Identifier(ident))
+                tokens.push(Token::StringLiteral(ident))
             }
             c if c.is_whitespace() => continue,
             c if c.is_alphanumeric() => {
@@ -135,6 +142,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     "int" | "integer" => tokens.push(Token::Int),
                     "text" => tokens.push(Token::Text),
                     "float" => tokens.push(Token::Float),
+                    "bool" => tokens.push(Token::Bool),
                     "into" => tokens.push(Token::Into),
                     "insert" => tokens.push(Token::Insert),
                     "values" => tokens.push(Token::Values),
@@ -144,7 +152,17 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     "and" => tokens.push(Token::And),
                     "or" => tokens.push(Token::Or),
                     "delete" => tokens.push(Token::Delete),
-                    _ => tokens.push(Token::Identifier(ident)),
+                    other => {
+                        if let Ok(int) = other.parse::<i32>() {
+                            tokens.push(Token::IntLiteral(int))
+                        } else if let Ok(float) = other.parse::<f32>() {
+                            tokens.push(Token::FloatLiteral(float))
+                        } else if matches!(other, "true" | "false") {
+                            tokens.push(Token::BoolLiteral(other == "true"))
+                        } else {
+                            tokens.push(Token::StringLiteral(ident))
+                        }
+                    }
                 }
             }
 
@@ -156,7 +174,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 }
 
 /// Ast Representation
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum Statement {
     Select(SelectStatement),
     Create(CreateStatement),
@@ -166,44 +184,45 @@ enum Statement {
     Delete(DeleteStatement),
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct DeleteStatement {
     core: DeleteCore,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct DeleteCore {
     table: String,
     conditions: Option<Vec<Condition>>, // TODO! does this handle multiple
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct UpdateStatement {
     core: UpdateCore,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct UpdateCore {
     table: String,
-    columns: Vec<Expr>,
+    columns: Vec<ColumnExpr>,
     conditions: Option<Vec<Condition>>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct Condition {
     column: String,
     criterion: Criterion,
     value: Value,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum Value {
     Text(String),
     Int(i32),
-    // Float(f32), //TODO! handle floats
+    Bool(bool),
+    Float(f32),
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum Criterion {
     GreaterThan,
     EqualTo,
@@ -213,128 +232,129 @@ enum Criterion {
     NotEqualTo,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct InsertStatement {
     core: InsertCore,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct InsertCore {
     table: String,
-    columns: Vec<Expr>,
-    values: Vec<Vec<Expr>>,
+    columns: Vec<ColumnExpr>,
+    values: Vec<Vec<Value>>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct CreateStatement {
     core: CreateCore,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct CreateCore {
     family: CreateFamily,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum CreateFamily {
     Database(CreateDatabase),
     Table(CreateTable),
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct CreateTable {
     name: String,
-    columns: Vec<Expr>,
+    columns: Vec<ColumnExpr>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct CreateDatabase {
     name: String,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct DropStatement {
     core: DropCore,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct DropCore {
     family: DropFamily,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum DropFamily {
     Database(DropDatabase),
     Table(DropTable),
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct DropTable {
     name: String,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct DropDatabase {
     name: String,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct SelectStatement {
     core: SelectCore,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct SelectCore {
     result_columns: Vec<ResultColumn>,
     from: SelectFrom,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum SelectFrom {
     Table(String),
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum ResultColumn {
     Star,
-    Expr(ExprResultColumn),
+    Expr(AliasedColumn),
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct ExprResultColumn {
-    expr: Expr,
+#[derive(Debug, PartialEq)]
+struct AliasedColumn {
+    expr: ColumnExpr,
     alias: Option<String>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-enum Expr {
-    Column(Column),
-    FatColumn(FatColumn),
-    PregnantColumn(PregnantColumn),
+#[derive(Debug, PartialEq)]
+enum ColumnExpr {
+    Name(ColumnName),
+    Typed(TypedColumn),
+    Assignment(ValueAssignment),
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct PregnantColumn {
+#[derive(Debug, PartialEq)]
+struct ValueAssignment {
     name: String,
     value: Value,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct Column {
+#[derive(Debug, PartialEq)]
+struct ColumnName {
     name: String,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct FatColumn {
+#[derive(Debug, PartialEq)]
+struct TypedColumn {
     col_name: String,
     data_type: DataType,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum DataType {
     Int,
     Float,
     Text,
+    Bool,
 }
 
 /// Recursive Descent parser
@@ -384,16 +404,24 @@ impl Parser {
 
     /// Get string representation of ident; fail if token is not ident
     fn expect_identifier(&mut self) -> Result<&str, String> {
-        self.expect_matching(|t| matches!(t, Token::Identifier(_)))
+        self.expect_matching(|t| matches!(t, Token::StringLiteral(_)))
             .map(|t| t.as_identifier().unwrap())
     }
 
     fn expect_value(&mut self) -> Result<Value, String> {
-        self.expect_matching(|t| matches!(t, Token::Identifier(_)))
-            .map(|t| t.to_value())?
+        self.expect_matching(|t| {
+            matches!(
+                t,
+                Token::StringLiteral(_)
+                    | Token::BoolLiteral(_)
+                    | Token::IntLiteral(_)
+                    | Token::FloatLiteral(_)
+            )
+        })
+        .map(|t| t.to_value())?
     }
 
-    fn parse_expr(&mut self) -> Result<Expr, String> {
+    fn parse_expr(&mut self) -> Result<ColumnExpr, String> {
         let name = self.expect_identifier()?.to_string();
         match self.peek_next_token() {
             None => Err("Unexpected end of input".to_string()),
@@ -401,18 +429,18 @@ impl Parser {
                 if token.is_data_type() {
                     let data_type = token.to_data_type().unwrap();
                     self.advance();
-                    Ok(Expr::FatColumn(FatColumn {
+                    Ok(ColumnExpr::Typed(TypedColumn {
                         col_name: name,
                         data_type,
                     }))
                 } else {
-                    Ok(Expr::Column(Column { name }))
+                    Ok(ColumnExpr::Name(ColumnName { name }))
                 }
             }
         }
     }
 
-    fn parse_expr_result_column(&mut self) -> Result<ExprResultColumn, String> {
+    fn parse_expr_result_column(&mut self) -> Result<AliasedColumn, String> {
         let expr = self.parse_expr()?;
         let alias = if self.next_token_is(Token::As) {
             self.advance();
@@ -421,7 +449,7 @@ impl Parser {
             None
         };
 
-        Ok(ExprResultColumn { expr, alias })
+        Ok(AliasedColumn { expr, alias })
     }
 
     fn parse_result_column(&mut self) -> Result<ResultColumn, String> {
@@ -493,7 +521,7 @@ impl Parser {
         })
     }
 
-    fn parse_create_table_columns(&mut self) -> Result<Vec<Expr>, String> {
+    fn parse_create_table_columns(&mut self) -> Result<Vec<ColumnExpr>, String> {
         let mut columns = vec![self.parse_expr()?];
 
         while self.next_token_is(Token::Comma) {
@@ -539,21 +567,32 @@ impl Parser {
         })
     }
 
-    fn parse_insert_values(&mut self) -> Result<Vec<Vec<Expr>>, String> {
+    fn parse_insert_value(&mut self) -> Result<Vec<Value>, String> {
+        let mut vals = vec![self.expect_value()?];
+
+        while self.next_token_is(Token::Comma) {
+            self.advance();
+            vals.push(self.expect_value()?);
+        }
+
+        Ok(vals)
+    }
+
+    fn parse_insert_values(&mut self) -> Result<Vec<Vec<Value>>, String> {
         self.expect_eq(Token::LeftParen)?;
-        let mut vals = vec![self.parse_insert_columns()?];
+        let mut vals = vec![self.parse_insert_value()?];
         self.expect_eq(Token::RightParen)?;
 
         while self.next_token_is(Token::Comma) {
             self.advance();
             self.expect_eq(Token::LeftParen)?;
-            vals.push(self.parse_insert_columns()?);
+            vals.push(self.parse_insert_value()?);
             self.expect_eq(Token::RightParen)?;
         }
         Ok(vals)
     }
 
-    fn parse_insert_columns(&mut self) -> Result<Vec<Expr>, String> {
+    fn parse_insert_columns(&mut self) -> Result<Vec<ColumnExpr>, String> {
         let mut cols = vec![self.parse_expr()?];
 
         while self.next_token_is(Token::Comma) {
@@ -635,15 +674,15 @@ impl Parser {
         Ok(Some(conds))
     }
 
-    fn parse_update_column(&mut self) -> Result<Expr, String> {
+    fn parse_update_column(&mut self) -> Result<ColumnExpr, String> {
         let name = self.expect_identifier()?.to_string();
         self.expect_eq(Token::Equal)?;
         let value = self.expect_value()?;
 
-        Ok(Expr::PregnantColumn(PregnantColumn { name, value }))
+        Ok(ColumnExpr::Assignment(ValueAssignment { name, value }))
     }
 
-    fn parse_update_columns(&mut self) -> Result<Vec<Expr>, String> {
+    fn parse_update_columns(&mut self) -> Result<Vec<ColumnExpr>, String> {
         let mut cols = vec![self.parse_update_column()?];
 
         while matches!(self.peek_next_token(), Some(Token::Comma)) {
@@ -746,7 +785,8 @@ fn main() -> Result<(), String> {
     // let s = "insert into cats(name, age) values(mike, 10);";
     // let s = "insert into cats(name, age) values('mike andrew', 12);";
     // let s = "update cats set count = 0 where age = 10;";
-    let s = "update cats set name = 'andrew', age = 20 where name = 'mike';";
+    // let s = "update cats set name = 'andrew', age = 20 where name = 'mike';";
+    let s = "insert into cats(is_male) values(true);";
     let stmt = parse_statement(s)?;
     println!("{stmt:#?}");
 
@@ -819,6 +859,8 @@ mod tests {
         #[test]
         fn test_singles() {
             let s = "insert into cats(name) values(mike);";
+            assert!(parse_statement(s).is_ok());
+            let s = "insert into cats(is_male) values(true);";
             assert!(parse_statement(s).is_ok());
         }
 
