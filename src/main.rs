@@ -1585,8 +1585,9 @@ fn main() -> Result<(), String> {
     let mut vm = BytecodeEngine::new();
     let stmts = [
         "create database dev;",
-        "create table cats(name text);",
-        "insert into cats (name) values('foo');",
+        "create table cats(name text, age int);",
+        "insert into cats (name, age) values('foo', 10);",
+        "insert into cats (name, age) values('bar', 15);",
         "select * from cats;",
     ];
 
@@ -1821,20 +1822,20 @@ mod tests {
                     operand: Some("users".to_string()),
                 },
                 Instruction {
-                    opcode: OpCode::LoadColumn,
-                    operand: Some("name".to_string()),
-                },
-                Instruction {
                     opcode: OpCode::LoadValue,
                     operand: Some("Text".to_string()),
                 },
                 Instruction {
                     opcode: OpCode::LoadColumn,
-                    operand: Some("age".to_string()),
+                    operand: Some("name".to_string()),
                 },
                 Instruction {
                     opcode: OpCode::LoadValue,
                     operand: Some("Int".to_string()),
+                },
+                Instruction {
+                    opcode: OpCode::LoadColumn,
+                    operand: Some("age".to_string()),
                 },
                 Instruction {
                     opcode: OpCode::CreateTable,
