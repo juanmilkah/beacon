@@ -1,9 +1,8 @@
-// TODO! Correctly parse Insert statement values and their datatypes
-
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Token {
     And,
     As,
+    Asc,
     Bang,
     BangEqual,
     Bool,
@@ -11,12 +10,14 @@ enum Token {
     Create,
     Database,
     Delete,
+    Desc,
     Drop,
     Equal,
     Float,
     From,
     Greater,
     GreaterEqual,
+    GroupBy,
     StringLiteral(String),
     BoolLiteral(bool),
     IntLiteral(i32),
@@ -27,7 +28,10 @@ enum Token {
     LeftParen,
     Less,
     LessEqual,
+    Limit,
+    Offset,
     Or,
+    OrderBy,
     RightParen,
     Select,
     SemiColon,
@@ -126,12 +130,23 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             }
             c if c.is_whitespace() => continue,
             c if c.is_alphanumeric() => {
-                let mut ident = c.to_string().to_lowercase();
-                while let Some(cc) = input.next_if(|cc| cc.is_alphanumeric() || *cc == '_') {
-                    ident.extend(cc.to_lowercase());
-                }
+                let mut parse_next_ident = |current: Option<char>| -> String {
+                    let mut ident = match current {
+                        Some(cur) => String::from(cur),
+                        None => {
+                            if input.peek().is_some_and(|c| c.is_whitespace()) {
+                                input.next();
+                            }
+                            String::new()
+                        }
+                    };
+                    while let Some(cc) = input.next_if(|cc| cc.is_alphanumeric() || *cc == '_') {
+                        ident.extend(cc.to_lowercase());
+                    }
+                    ident.to_lowercase()
+                };
 
-                match ident.as_str() {
+                match parse_next_ident(Some(c)).as_str() {
                     "select" => tokens.push(Token::Select),
                     "as" => tokens.push(Token::As),
                     "from" => tokens.push(Token::From),
@@ -151,7 +166,22 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     "set" => tokens.push(Token::Set),
                     "and" => tokens.push(Token::And),
                     "or" => tokens.push(Token::Or),
+                    "limit" => tokens.push(Token::Limit),
+                    "offset" => tokens.push(Token::Offset),
                     "delete" => tokens.push(Token::Delete),
+                    "asc" => tokens.push(Token::Asc),
+                    "desc" => tokens.push(Token::Desc),
+                    "order" => match parse_next_ident(None).as_str() {
+                        "by" => tokens.push(Token::OrderBy),
+                        other => {
+                            return Err(format!("Unexpected ident after 'order': {other}"));
+                        }
+                    },
+                    "group" => match parse_next_ident(None).as_str() {
+                        "by" => tokens.push(Token::GroupBy),
+                        other => return Err(format!("Unexpected ident after 'group': {other}")),
+                    },
+
                     other => {
                         if let Ok(int) = other.parse::<i32>() {
                             tokens.push(Token::IntLiteral(int))
@@ -160,7 +190,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                         } else if matches!(other, "true" | "false") {
                             tokens.push(Token::BoolLiteral(other == "true"))
                         } else {
-                            tokens.push(Token::StringLiteral(ident))
+                            tokens.push(Token::StringLiteral(other.to_string()))
                         }
                     }
                 }
@@ -192,7 +222,7 @@ struct DeleteStatement {
 #[derive(Debug, PartialEq)]
 struct DeleteCore {
     table: String,
-    conditions: Option<Vec<Condition>>, // TODO! does this handle multiple
+    conditions: Option<Vec<MultiCondition>>, // TODO! does this handle multiple
 }
 
 #[derive(Debug, PartialEq)]
@@ -204,11 +234,29 @@ struct UpdateStatement {
 struct UpdateCore {
     table: String,
     columns: Vec<ColumnExpr>,
-    conditions: Option<Vec<Condition>>,
+    conditions: Option<Vec<MultiCondition>>,
 }
 
 #[derive(Debug, PartialEq)]
-struct Condition {
+enum Condition {
+    Single(SingleCondition),
+    Double(DoubleCondition),
+    Multi(MultiCondition),
+}
+
+#[derive(Debug, PartialEq)]
+struct SingleCondition {
+    name: Token,
+}
+
+#[derive(Debug, PartialEq)]
+struct DoubleCondition {
+    name: Token,
+    value: Value,
+}
+
+#[derive(Debug, PartialEq)]
+struct MultiCondition {
     column: String,
     criterion: Criterion,
     value: Value,
@@ -306,6 +354,7 @@ struct SelectStatement {
 struct SelectCore {
     result_columns: Vec<ResultColumn>,
     from: SelectFrom,
+    conditions: Option<Vec<Condition>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -477,16 +526,53 @@ impl Parser {
         Ok(SelectFrom::Table(table.to_string()))
     }
 
+    fn parse_single_condition(&mut self) -> Result<SingleCondition, String> {
+        let name = self.next_token().unwrap().to_owned();
+        Ok(SingleCondition { name })
+    }
+
+    fn parse_double_condition(&mut self) -> Result<DoubleCondition, String> {
+        let name = self.next_token().unwrap().to_owned();
+        let value = self.expect_value()?;
+
+        Ok(DoubleCondition { name, value })
+    }
+
+    fn parse_select_conditions(&mut self) -> Result<Option<Vec<Condition>>, String> {
+        let mut conds = Vec::new();
+
+        while let Some(next) = self.peek_next_token() {
+            let cond = match next {
+                Token::Asc | Token::Desc => Condition::Single(self.parse_single_condition()?),
+                Token::Offset | Token::Limit | Token::OrderBy | Token::GroupBy => {
+                    Condition::Double(self.parse_double_condition()?)
+                }
+                Token::Where => Condition::Multi(self.parse_multi_condition()?),
+                _ => break,
+            };
+
+            conds.push(cond);
+        }
+
+        if conds.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(conds))
+        }
+    }
+
     fn parse_select(&mut self) -> Result<SelectStatement, String> {
         self.expect_eq(Token::Select)?;
         let result_columns = self.parse_result_columns()?;
         self.expect_eq(Token::From)?;
         let from = self.parse_select_from()?;
+        let conditions = self.parse_select_conditions()?;
 
         Ok(SelectStatement {
             core: SelectCore {
                 result_columns,
                 from,
+                conditions,
             },
         })
     }
@@ -639,19 +725,19 @@ impl Parser {
         }
     }
 
-    fn parse_condition(&mut self) -> Result<Condition, String> {
+    fn parse_multi_condition(&mut self) -> Result<MultiCondition, String> {
         let column = self.expect_identifier()?.to_string();
         let criterion = self.expect_criterion()?;
         let value = self.expect_value()?;
 
-        Ok(Condition {
+        Ok(MultiCondition {
             column,
             criterion,
             value,
         })
     }
 
-    fn parse_conditions(&mut self) -> Result<Option<Vec<Condition>>, String> {
+    fn parse_conditions(&mut self) -> Result<Option<Vec<MultiCondition>>, String> {
         if !matches!(self.peek_next_token(), Some(Token::Where)) {
             return Ok(None);
         }
@@ -660,7 +746,7 @@ impl Parser {
         let mut conds = Vec::new();
         // TODO! What's the guard for condition?
         loop {
-            conds.push(self.parse_condition()?);
+            conds.push(self.parse_multi_condition()?);
             if let Some(next) = self.peek_next_token()
                 && matches!(next, Token::And | Token::Or)
             {
@@ -744,7 +830,7 @@ impl Parser {
 
 fn parse_statement(input: &str) -> Result<Statement, String> {
     let tokens = tokenize(input)?;
-    // dbg!(&tokens);
+    dbg!(&tokens);
     let mut parser = Parser::new(tokens);
     let stmt = parser.parse_statement()?;
     parser.expect_eq(Token::SemiColon)?;
@@ -755,7 +841,24 @@ fn parse_statement(input: &str) -> Result<Statement, String> {
 // select name from foo;
 // select name as n from foo;
 // select name, age as x from foo;
-
+// select * from foo limit 10;
+// select * from foo offset 10;
+// SELECT * FROM users LIMIT 10 OFFSET 5;
+// SELECT * FROM users ORDER BY created_at DESC;
+// SELECT name FROM users ORDER BY age ASC;
+// SELECT department, COUNT(*) FROM employees GROUP BY department;
+//
+//  /* Not Implemented */
+// SELECT department, COUNT(*) FROM employees GROUP BY department HAVING COUNT(*) > 5;
+// SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id;
+// SELECT * FROM users LEFT JOIN profiles ON users.id = profiles.user_id;
+// SELECT * FROM users WHERE id IN (SELECT user_id FROM orders);
+// SELECT name FROM users WHERE EXISTS (SELECT 1 FROM logins WHERE logins.user_id = users.id);
+// SELECT COUNT(*) FROM users;
+// SELECT AVG(age) FROM users;
+// SELECT MAX(score) FROM games;
+// SELECT DISTINCT city FROM users;
+// /* ** */
 // drop table foo;
 // drop database foo;
 
@@ -776,17 +879,20 @@ fn parse_statement(input: &str) -> Result<Statement, String> {
 
 // delete from cats;
 // delete from cats where name = 'andrew';
-// TODO! Does delete allow multi conditions
-// My version supports multi conditions
+// delete from cats where name = 'andrew' and age = 20;
 fn main() -> Result<(), String> {
-    // let stmt = "select names as n from cats;";
-    // let stmt = "drop table cats;";
+    // let s = "select names as n from cats;";
+    // let s = "drop table cats;";
     // let s = "create table cats (name text, age int) ;";
     // let s = "insert into cats(name, age) values(mike, 10);";
     // let s = "insert into cats(name, age) values('mike andrew', 12);";
     // let s = "update cats set count = 0 where age = 10;";
     // let s = "update cats set name = 'andrew', age = 20 where name = 'mike';";
-    let s = "insert into cats(is_male) values(true);";
+    // let s = "insert into cats(is_male) values(true);";
+    // let s = "select * from foo offset 10;";
+    // let s = "SELECT * FROM users LIMIT 10 OFFSET 5;";
+    // let s = "SELECT * FROM users ORDER BY created_at DESC;";
+    let s = "SELECT department FROM employees GROUP BY department;";
     let stmt = parse_statement(s)?;
     println!("{stmt:#?}");
 
@@ -814,6 +920,34 @@ mod tests {
             let s = "select name as n, age as x from cats;";
             assert!(parse_statement(s).is_ok());
         }
+
+        #[test]
+        fn test_single_condition() {
+            let s = "select * from foo limit 10;";
+            assert!(parse_statement(s).is_ok());
+
+            let s = "select * from foo offset 10;";
+            assert!(parse_statement(s).is_ok());
+        }
+
+        #[test]
+        fn test_double_conditions() {
+            let s = "SELECT * FROM users LIMIT 10 OFFSET 5;";
+            assert!(parse_statement(s).is_ok());
+
+            let s = "SELECT * FROM users ORDER BY created_at DESC;";
+            assert!(parse_statement(s).is_ok());
+
+            let s = "SELECT name FROM users ORDER BY age ASC;";
+            assert!(parse_statement(s).is_ok());
+
+            let s = "SELECT department FROM employees GROUP BY department;";
+            assert!(parse_statement(s).is_ok());
+        }
+
+        #[test]
+        #[ignore]
+        fn test_multi_condition() {}
     }
 
     mod parse_drop {
