@@ -1130,8 +1130,9 @@ impl Compiler {
                 self.emit(OpCode::LoadColumn, Some(column_name.name.clone()))
             }
             ColumnExpr::Typed(typed_column) => {
-                self.emit(OpCode::LoadColumn, Some(typed_column.col_name.clone()));
+                // flipped these
                 self.emit(OpCode::LoadValue, Some(typed_column.data_type.to_string()));
+                self.emit(OpCode::LoadColumn, Some(typed_column.col_name.clone()));
             }
             ColumnExpr::Assignment(value_assignment) => {
                 self.emit(OpCode::LoadColumn, Some(value_assignment.name.clone()));
@@ -1457,26 +1458,21 @@ impl BytecodeEngine {
                     // Collect column definitions from stack
                     while let Ok(value) = self.peek() {
                         match value {
-                            StackValue::Text(type_str) => {
-                                if type_str.starts_with("Int")
-                                    || type_str.starts_with("Text")
-                                    || type_str.starts_with("Float")
-                                    || type_str.starts_with("Bool")
+                            StackValue::Column(col) => {
+                                let col_name = col.clone();
+                                self.pop()?;
+                                if let Ok(type_str) = self.peek()
+                                    && let StackValue::Text(text) = type_str
+                                    && (text.starts_with("Int")
+                                        || text.starts_with("Text")
+                                        || text.starts_with("Float")
+                                        || text.starts_with("Bool"))
                                 {
-                                    let type_str = type_str.clone();
+                                    column_types.insert(col_name.clone(), text.to_string());
                                     self.pop()?;
-
-                                    if let Ok(col) = self.peek()
-                                        && let StackValue::Column(c) = col
-                                    {
-                                        let col_name = c.clone();
-                                        self.pop()?;
-                                        column_types.insert(col_name.clone(), type_str);
-                                    }
-                                } else {
-                                    break;
                                 }
                             }
+
                             StackValue::Table(_) => {
                                 break;
                             }
@@ -1589,8 +1585,9 @@ fn main() -> Result<(), String> {
     let mut vm = BytecodeEngine::new();
     let stmts = [
         "create database dev;",
-        "create table cats(name text);",
-        "insert into cats (name) values('foo');",
+        "create table cats(name text, age int);",
+        "insert into cats (name, age) values('foo', 10);",
+        "insert into cats (name, age) values('bar', 15);",
         "select * from cats;",
     ];
 
@@ -1825,20 +1822,20 @@ mod tests {
                     operand: Some("users".to_string()),
                 },
                 Instruction {
-                    opcode: OpCode::LoadColumn,
-                    operand: Some("name".to_string()),
-                },
-                Instruction {
                     opcode: OpCode::LoadValue,
                     operand: Some("Text".to_string()),
                 },
                 Instruction {
                     opcode: OpCode::LoadColumn,
-                    operand: Some("age".to_string()),
+                    operand: Some("name".to_string()),
                 },
                 Instruction {
                     opcode: OpCode::LoadValue,
                     operand: Some("Int".to_string()),
+                },
+                Instruction {
+                    opcode: OpCode::LoadColumn,
+                    operand: Some("age".to_string()),
                 },
                 Instruction {
                     opcode: OpCode::CreateTable,
